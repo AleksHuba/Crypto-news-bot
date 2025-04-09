@@ -1,0 +1,128 @@
+import os
+import requests
+import logging
+from telegram import Bot
+import asyncio
+import html
+from hashlib import md5
+from datetime import datetime, timedelta
+
+# Налаштування
+NEWS_API_KEY = "e58f2147d5994ee68a468b6d7c7c79eb"
+CRYPTO_PANIC_KEY = "5bb41c03f0f3ba2c5f1dbb92d1417c492074b13d"
+TG_BOT_TOKEN = "7577931735:AAFVIHqL6FJpD-pm-hC7zC8wEIx6UHZTdv4"
+CHAT_ID = "@TOPcommunityTOP"
+
+bot = Bot(token=TG_BOT_TOKEN)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+sent_news_hashes = set()
+last_check_time = datetime.utcnow() - timedelta(hours=1)
+
+def clean_text(text):
+    return html.escape(text)
+
+def is_new_article(uid):
+    if uid in sent_news_hashes:
+        return False
+    sent_news_hashes.add(uid)
+    return True
+
+def get_news_from_newsapi(lang):
+    try:
+        query = "crypto OR binance OR bybit OR okx OR coinmarketcap"
+        url = (
+            f"https://newsapi.org/v2/everything?"
+            f"q={query}&"
+            f"language={lang}&"
+            f"sortBy=publishedAt&"
+            f"pageSize=10&"
+            f"apiKey={NEWS_API_KEY}"
+        )
+        response = requests.get(url)
+        data = response.json()
+        return data.get("articles", []) if data.get("status") == "ok" else []
+    except Exception as e:
+        logging.error(f"NewsAPI ({lang}) error: %s", e)
+        return []
+
+def get_news_from_cryptopanic():
+    try:
+        url = f"https://cryptopanic.com/api/v1/posts/?auth_token={CRYPTO_PANIC_KEY}&public=true"
+        response = requests.get(url)
+        data = response.json()
+        return data.get("results", []) if data.get("results") else []
+    except Exception as e:
+        logging.error("CryptoPanic error: %s", e)
+        return []
+
+async def send_news():
+    global last_check_time
+    now = datetime.utcnow()
+
+    # Українські та англійські новини з NewsAPI
+    for lang in ["en", "uk"]:
+        for article in get_news_from_newsapi(lang):
+            pub_time = article.get("publishedAt", "")
+            if pub_time:
+                article_time = datetime.strptime(pub_time, "%Y-%m-%dT%H:%M:%SZ")
+                if article_time < last_check_time:
+                    continue
+
+            title = clean_text(article.get("title", "Без заголовка"))
+            url = article.get("url", "#")
+            image = article.get("urlToImage")
+            uid = md5((title + url).encode()).hexdigest()
+
+            if is_new_article(uid):
+                message = f"📰 <b>{title}</b>\n🔗 <a href='{url}'>Читати більше</a>"
+                try:
+                    if image:
+                        await bot.send_photo(chat_id=CHAT_ID, photo=image, caption=message, parse_mode="HTML")
+                    else:
+                        await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="HTML")
+                    logging.info("Надіслано з NewsAPI (%s): %s", lang, title)
+                except Exception as e:
+                    logging.error("Telegram error: %s", e)
+                await asyncio.sleep(3)
+
+    # CryptoPanic
+    for article in get_news_from_cryptopanic():
+        pub_time = article.get("published_at", "")
+        if pub_time:
+            article_time = datetime.strptime(pub_time, "%Y-%m-%dT%H:%M:%S%z").replace(tzinfo=None)
+            if article_time < last_check_time:
+                continue
+
+        title = clean_text(article.get("title", "Без заголовка"))
+        url = article.get("url", "#")
+        uid = md5((title + url).encode()).hexdigest()
+
+        if is_new_article(uid):
+            message = f"📰 <b>{title}</b>\n🔗 <a href='{url}'>Читати більше</a>"
+            try:
+                await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="HTML")
+                logging.info("Надіслано з CryptoPanic: %s", title)
+            except Exception as e:
+                logging.error("Telegram error: %s", e)
+            await asyncio.sleep(3)
+
+    last_check_time = now
+
+async def main():
+    while True:
+        await send_news()
+        logging.info("Оновлення завершено. Очікування 1 годину...")
+        await asyncio.sleep(3600)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+python-telegram-bot==13.15
+requests
+services:
+  - type: web
+    name: crypto-news-bot
+    runtime: python
+    buildCommand: ""
+    startCommand: "python main.py"
+    autoDeploy: true
